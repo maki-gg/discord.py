@@ -452,6 +452,8 @@ class ConnectionState(Generic[ClientT]):
         guild = self._guilds.get(guild_id)  # type: ignore
         if guild is not None and self._redis_cache is not None:
             self._touch_guild_lru(guild_id)  # type: ignore
+            if isinstance(guild, ProxiedGuild) and not guild.is_loaded():
+                asyncio.create_task(guild.load())
         return guild
 
     def _get_or_create_unavailable_guild(self, guild_id: int, *, data: Optional[Dict[str, Any]] = None) -> Guild:
