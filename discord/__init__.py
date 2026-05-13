@@ -76,6 +76,7 @@ from .presences import *
 from .primary_guild import *
 from .onboarding import *
 from .collectible import *
+from .redis_cache import RedisCacheOptions
 
 
 class VersionInfo(NamedTuple):

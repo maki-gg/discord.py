@@ -102,6 +102,7 @@ __all__ = (
     'Guild',
     'GuildPreview',
     'BanEntry',
+    'ProxiedGuild',
 )
 
 MISSING = utils.MISSING
@@ -4964,3 +4965,131 @@ class Guild(Hashable):
             reason=reason if reason is not MISSING else None,
         )
         return Onboarding(data=data, guild=self, state=self._state)
+
+
+class ProxiedGuild(Guild):
+    """A :class:`Guild` subclass used when Redis caching is enabled.
+
+    Guild sub-entity dicts (members, channels, roles, threads, emojis,
+    stickers) can be evicted from memory via :meth:`_unload` and
+    restored on demand via :meth:`load`.  The guild's scalar metadata
+    (name, id, owner, etc.) always remains in memory.
+    """
+
+    __slots__ = ('_is_loaded',)
+
+    def __init__(self, *, data: GuildPayload, state: ConnectionState) -> None:  # type: ignore[override]
+        self._is_loaded: bool = False
+        super().__init__(data=data, state=state)
+        # Mark as fully loaded only for real (available) guilds with sub-entity data.
+        # Unavailable stubs and base-only payloads remain _is_loaded=False.
+        self._is_loaded = not self.unavailable and (
+            'channels' in data or 'members' in data or 'roles' in data
+        )
+
+    def is_loaded(self) -> bool:
+        """:class:`bool`: Whether sub-entity dicts are currently in memory."""
+        return self._is_loaded
+
+    def _unload(self) -> None:
+        """Clear all heavy sub-entity dicts, freeing memory.
+
+        Redis already has the current state from continuous event mirroring,
+        so nothing needs to be written here.
+        """
+        self._channels = {}
+        self._members = {}
+        self._roles = {}
+        self._threads = {}
+        self._stage_instances = {}
+        self._scheduled_events = {}
+        self._soundboard_sounds = {}
+        self._voice_states = {}
+        for emoji in self.emojis:
+            self._state._emojis.pop(emoji.id, None)
+        for sticker in self.stickers:
+            self._state._stickers.pop(sticker.id, None)
+        self.emojis = ()
+        self.stickers = ()
+        self._is_loaded = False
+
+    async def load(self) -> 'ProxiedGuild':
+        """|coro|
+
+        Populate sub-entity dicts from Redis.  If the guild is already
+        loaded this is a no-op.
+
+        Raises
+        ------
+        RuntimeError
+            The guild's base data is no longer in Redis (TTL expired).
+        """
+        if self._is_loaded:
+            return self
+
+        cache = self._state._redis_cache
+        if cache is None:
+            raise RuntimeError('Redis cache is not configured on this ConnectionState.')
+
+        base_data = await cache.get_guild_base(self.id)
+        if base_data is None:
+            raise RuntimeError(
+                f'Guild {self.id!r} base data not found in Redis. '
+                'The TTL may have expired.'
+            )
+
+        # Reset all sub-entity dicts then re-init scalar metadata from base.
+        # _from_data resets _roles to {} and skips channels/members/threads
+        # when those keys are absent from the payload.
+        self._channels = {}
+        self._members = {}
+        self._threads = {}
+        self._stage_instances = {}
+        self._scheduled_events = {}
+        self._soundboard_sounds = {}
+        self._voice_states = {}
+        self._from_data(base_data)
+
+        # Roles
+        roles_raw = await cache.get_roles(self.id)
+        for role_data in roles_raw.values():
+            role = Role(guild=self, data=role_data, state=self._state)
+            self._roles[role.id] = role
+
+        # Channels
+        channels_raw = await cache.get_channels(self.id)
+        for ch_data in channels_raw.values():
+            factory, _ = _guild_channel_factory(ch_data['type'])
+            if factory:
+                channel = factory(guild=self, data=ch_data, state=self._state)  # type: ignore[arg-type]
+                self._channels[channel.id] = channel  # type: ignore[index]
+
+        # Members
+        members_raw = await cache.get_members(self.id)
+        for member_data in members_raw.values():
+            member = Member(data=member_data, guild=self, state=self._state)  # type: ignore[arg-type]
+            self._members[member.id] = member
+
+        # Threads
+        threads_raw = await cache.get_threads(self.id)
+        for thread_data in threads_raw.values():
+            thread = Thread(guild=self, state=self._state, data=thread_data)
+            self._threads[thread.id] = thread
+
+        # Emojis (only when the expressions intent is enabled)
+        if self._state.cache_guild_expressions:
+            emojis_raw = await cache.get_emojis(self.id)
+            if emojis_raw:
+                self.emojis = tuple(
+                    self._state.store_emoji(self, d) for d in emojis_raw.values()
+                )
+
+            stickers_raw = await cache.get_stickers(self.id)
+            if stickers_raw:
+                self.stickers = tuple(
+                    self._state.store_sticker(self, d) for d in stickers_raw.values()
+                )
+
+        self._is_loaded = True
+        self._state._touch_guild_lru(self.id)
+        return self
