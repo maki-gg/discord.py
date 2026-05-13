@@ -153,10 +153,13 @@ To enable it, install the extra dependency and pass a ``RedisCacheOptions`` inst
 
     bot.run('token')
 
-``RedisCacheOptions`` accepts per-entity TTLs (``guild_ttl``, ``member_ttl``, ``channel_ttl``,
-``role_ttl``, ``thread_ttl``, ``emoji_ttl``, ``sticker_ttl``) so you can expire large member
-lists sooner than stable data like channels or roles. All values default to sensible values for
-bots running ~1000 guilds per shard.
+``RedisCacheOptions`` accepts per-entity-type TTLs (``guild_ttl``, ``member_ttl``,
+``channel_ttl``, ``role_ttl``, ``thread_ttl``, ``emoji_ttl``, ``sticker_ttl``). Each TTL
+controls how long a guild's entire collection of that entity type lives in Redis, for example,
+a shorter ``member_ttl`` means that when a guild goes completely quiet, its member data is
+evicted from Redis sooner than its channel or role data. TTLs apply to the whole collection per
+guild, not to individual inactive members within an active guild. All values default to sensible
+values for bots running ~1000 guilds per shard.
 
 When a guild is evicted from memory its sub-entity collections (members, channels, roles, threads)
 are cleared and the guild object becomes a thin shell. The library automatically schedules a
@@ -166,7 +169,7 @@ collections, all subsequent events will see the fully restored guild.
 
 ``guild.load()`` tries Redis first. If the Redis TTL has expired (e.g. on a long-running bot that
 hasn't reconnected in days), it falls back to the Discord REST API, fetches the guild's channels
-and roles, re-warms the Redis cache, and populates memory — all transparently. Members are not
+and roles, re-warms the Redis cache, and populates memory, all transparently. Members are not
 fetched via REST since paginating through large member lists on every cache miss would be
 prohibitive; they re-populate naturally via gateway events as users interact.
 
